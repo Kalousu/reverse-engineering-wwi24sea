@@ -5,16 +5,16 @@ set -e
 echo "[*] Kompiliere lv (gehärtet, optimiert)..."
 # -O2 verschleift den Kontrollfluss zusätzlich; -s strippt Symbole;
 # -fno-asynchronous-unwind-tables macht das Binary schlanker/undurchsichtiger.
-gcc -O2 -s -fno-asynchronous-unwind-tables -o lv v2_lv.c
+gcc -O2 -s -fno-asynchronous-unwind-tables -o ../build/lv v2_lv.c
 
 echo "[*] Zusätzliches Strippen (Sicherheitsnetz)..."
 strip --strip-all lv 2>/dev/null || true
 
 echo "[*] Kompiliere Referenz-Cipher (Invertierbarkeits-Beweis)..."
-gcc -O2 -o reference_cipher v2_reference_cipher.c
+gcc -O2 -o ../build/reference_cipher v2_reference_cipher.c
 
 echo "[*] Kompiliere Musterlösung..."
-gcc -O2 -o solve v2_solve.c
+gcc -O2 -o ../build/solve v2_solve.c
 
 echo ""
 echo "[+] Fertig."
