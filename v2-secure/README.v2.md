@@ -1,0 +1,1 @@
+v2_gehaertet/ – dieselbe Chiffre, aber mit verteiltem Zustand (init_state), aus Teilen gefalteten Konstanten (P0[]), nichtssagenden Bezeichnern und den fünf Runden verschränkt in einer reveal()-Funktion. Das build.sh strippt zusätzlich. Verhalten und Flag sind identisch – bewiesen.
