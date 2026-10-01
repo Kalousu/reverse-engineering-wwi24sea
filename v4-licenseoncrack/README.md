@@ -48,3 +48,6 @@ Rekonstruktion, nicht die Rekonstruktion selbst.
     ./genhash 'DEIN-KEY'              # Ausgabe -> STORED_HASH in lv.c
     gcc -O2 -o lv lv.c
     ./lv 'DEIN-KEY'                   # Access granted.
+
+
+./build.sh 'FLAG{4cc3ss_d3n13d}'
