@@ -61,3 +61,16 @@ kurz existiert, liest man es Iteration fuer Iteration aus `t` aus --
 - solve.py    : rechnet den Key zurueck (Loeser-Seite, Beweis)
 - build.sh    : baut + testet ./lv
 - Abgabe zum Knacken: NUR ./lv
+
+## Bauen
+In der Lima/Linux-VM (das ist die ABGABE):
+    ./build.sh --linux      # oder einfach ./build.sh (auto)
+    -> ../build/lv  (x86-64 ELF, stripped)
+
+Nur zum lokalen Funktionstest auf dem Mac (NICHT die Abgabe):
+    ./build.sh --macos
+    -> ../build/lv_macos_test  (Mach-O/ARM64, anderer Name, nicht abgeben)
+
+Hinweis: Ein macOS/ARM-Build testet nur, OB die Pruef-Logik Keys
+richtig akzeptiert/ablehnt. Das reverse-engineerte Artefakt ist immer
+das x86-64 Linux ELF. Zum Knacken wird NUR ../build/lv weitergegeben.

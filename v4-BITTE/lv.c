@@ -41,8 +41,28 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <sys/ptrace.h>
 #include <time.h>
+/* Anti-Debug -- plattformabhaengig.
+ *
+ * WICHTIG: Die ABGABE ist das x86-64 Linux ELF (in der Lima-VM gebaut).
+ * Der macOS/ARM-Zweig existiert NUR, damit du die Pruef-LOGIK lokal
+ * funktional testen kannst. Ein macOS-Build ist ein Mach-O/ARM64-
+ * Binary und entspricht NICHT dem, was reverse-engineert wird. */
+#if defined(__linux__)
+  #include <sys/syscall.h>
+  #include <unistd.h>
+  #ifndef SYS_ptrace
+    #define SYS_ptrace 101  /* x86-64 */
+  #endif
+#elif defined(__APPLE__)
+  #include <unistd.h>
+  /* macOS: PT_DENY_ATTACH verhindert das Anhaengen eines Debuggers.
+   * Deklaration ohne <sys/ptrace.h>-Konstantenabhaengigkeit. */
+  extern int ptrace(int, pid_t, void*, int);
+  #define PT_DENY_ATTACH 31
+#else
+  #warning "Unbekannte Plattform -- Anti-Debug deaktiviert."
+#endif
 
 #define KEYLEN 19
 
@@ -65,11 +85,22 @@ static uint32_t fold_seed(void){
  * Rueckgabe wird als additiver "Dreh" in die Pruefung eingespeist:
  * unter dem Debugger wird somit ein FALSCHER Zielwert erzeugt. */
 static uint8_t debugger_skew(void){
-    long r = ptrace(PTRACE_TRACEME, 0, 0, 0);
-    if (r == -1) return 0x6B;   /* Debugger erkannt -> Pfad verfaelschen */
-    /* kein Debugger: TRACEME war erfolgreich -> wieder loesen */
-    ptrace(PTRACE_DETACH, 0, 0, 0);
+#if defined(__linux__)
+    /* PTRACE_TRACEME(0) schlaegt fehl (-1), wenn schon ein Debugger
+     * dranhaengt -> dann Pfad verfaelschen. Sonst wieder loesen (DETACH=17). */
+    long r = syscall(SYS_ptrace, 0, 0, 0, 0);
+    if (r == -1) return 0x6B;
+    syscall(SYS_ptrace, 17, 0, 0, 0);
     return 0x00;
+#elif defined(__APPLE__)
+    /* PT_DENY_ATTACH: wirft unter einem Debugger bzw. verhindert Attach.
+     * Rueckgabe -1 signalisiert hier eine bereits bestehende Trace-Situation. */
+    int r = ptrace(PT_DENY_ATTACH, 0, 0, 0);
+    if (r == -1) return 0x6B;
+    return 0x00;
+#else
+    return 0x00;
+#endif
 }
 
 /* ---- Pro-Byte-Sollwert: eingabe-/positionsabhaengig -------------- */
