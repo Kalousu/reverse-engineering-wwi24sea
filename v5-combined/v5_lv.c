@@ -1,37 +1,7 @@
 /*
- * lv.c -- "LicenseGuard" v5 (kombinierte Haertung)
+ * licenseguard.c -- LicenseGuard v5
  *
  * Aufruf:  ./lv <lizenzschluessel>
- *
- * v5 vereint alle Techniken aus v2 und v4:
- *
- * Aus v2 uebernommen:
- *   [CFF]    Control-Flow-Flattening   -- Dispatcher-Schleife statt
- *            sichtbarer Ablaufstruktur
- *   [MBA]    Mixed Boolean-Arithmetic  -- XOR/ADD/SUB verschleiert
- *   [OP]     Opaque Predicates         -- algebraisch immer wahr/falsch
- *   [IND]    Indirekte Aufrufe         -- Funktionszeiger per XOR maskiert
- *   [CSPLIT] Konstanten-Splitting      -- keine zusammenhaengenden Literale
- *   [VM]     Mini-Bytecode-Interpreter -- letzte Stufe als Bytecode
- *   [JUNK]   Dead Code                 -- Schein-Pruefsummen
- *
- * Aus v4 uebernommen:
- *   [NODUMP] Kein vollstaendiger Key im RAM -- zeichenweise Pruefung
- *            mit sofortigem Wipe des Sollwerts
- *   [INPUT]  Eingabe-/positionsabhaengige Pruefung mit Verkettung
- *   [AD]     Anti-Debugging via ptrace-Selfcheck + Timing-Skew
- *
- * Neu in v5:
- *   [HASH]   Keinen direkten Byte-Vergleich mehr -- stattdessen wird
- *            ein rollendes FNV-1a-Hashfragment akkumuliert; das Ergebnis
- *            stimmt nur, wenn ALLE Bytes stimmen, aber kein einzelner
- *            Vergleichspunkt zeigt welches Byte falsch ist.
- *   [TCTRL]  Timing-basierte Kontrolle -- Gesamtlaufzeit des Pruefloops
- *            wird gemessen; unter einem Debugger (Einzelschritt) wird ein
- *            zusaetzlicher Skew eingespeist.
- *
- * WICHTIG: Wie v2/v4 ist auch v5 eine Lernuebung -- mit genueg Geduld
- * ist alles invertierbar. Die Techniken erhoehen nur den Analyseaufwand.
  */
 
 #include <stdint.h>
@@ -63,11 +33,7 @@ static const uint8_t A0[16] = {
     0xF3,0x9C,0xC0,0x60,0x51,0x2D,0xA3,0x1B
 };
 
-/*
- * A1: so berechnet, dass die kombinierte v5-Transformation
- * (stage1..5 + target_byte-Verkettung) den Key "FLAG{4cc3ss_d3n13d}"
- * ergibt. Liegt nicht als Klartext vor.
- */
+/* A1: vorberechneter Eingabepuffer */
 static const uint8_t A1[KEYLEN] = {
     0xCC,0xB7,0x7F,0xDD,0x1A,0x79,0xF0,0x15,0xCB,0x56,
     0xA6,0x62,0xFB,0x89,0xA0,0x8E,0x91,0x7F,0x0C
@@ -105,6 +71,148 @@ static uint8_t rl(uint8_t v, int r) {
 static int op_always_true(int x)  { return (x * x - (x - 1) * (x + 1)) == 1; }
 static int op_always_false(unsigned x) __attribute__((unused));
 static int op_always_false(unsigned x) { return (int)((x | ~x) + 1u) != 0 ? 0 : 0; }
+
+/* ------------------------------------------------------------------ */
+/* Lizenz-Format-Validierung (Strukturpruefung)                        */
+/* ------------------------------------------------------------------ */
+
+/* Erlaubte Zeichenklassen im Schluessel */
+static const char LC_VALID_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                     "abcdefghijklmnopqrstuvwxyz"
+                                     "0123456789"
+                                     "{}!@#_-";
+
+/* Prueft ob ein Byte zu einer erlaubten Zeichenklasse gehoert.
+ * Wird vor der eigentlichen Verifikation aufgerufen. */
+static int lc_check_charset(const char *s, int len) {
+    for (int i = 0; i < len; i++) {
+        int found = 0;
+        for (int j = 0; LC_VALID_CHARS[j]; j++) {
+            if (s[i] == LC_VALID_CHARS[j]) { found = 1; break; }
+        }
+        if (!found) return 0;
+    }
+    return 1;
+}
+
+/* Einfache Pruefsumme ueber den Schluessel -- wird als Vorfilter
+ * eingesetzt bevor die teure kryptografische Pruefung laeuft. */
+static uint32_t lc_checksum(const uint8_t *data, int len) {
+    uint32_t h = 0x12345678u;
+    for (int i = 0; i < len; i++) {
+        h ^= (uint32_t)data[i] << (i & 0x18);
+        h  = (h << 5) | (h >> 27);
+        h += (uint32_t)data[i] * 0x9E3779B9u;
+    }
+    return h;
+}
+
+/* Erwartet fuer einen gueltigen Schluessel:
+ * Pruefsumme im Bereich [0x20000000, 0xDFFFFFFF].
+ * Filtert offensichtlich falsche Eingaben fruehzeitig aus. */
+static int lc_precheck(const char *in, int len) {
+    if (len != KEYLEN) return 0;
+    if (!lc_check_charset(in, len)) return 0;
+    uint32_t cs = lc_checksum((const uint8_t *)in, len);
+    return (cs >= 0x20000000u && cs <= 0xDFFFFFFFu);
+}
+
+/* ------------------------------------------------------------------ */
+/* Sekundaere Transformationspipeline (Integritaetspfad)               */
+/* ------------------------------------------------------------------ */
+
+/* Zweite S-Box fuer den Integritaetspfad -- unabhaengig von T[] */
+static uint8_t T2[256];
+static uint8_t g_t2 = 0;
+
+static void mk2(void) {
+    for (int i = 0; i < 256; i++) T2[i] = (uint8_t)((i * 251 + 97) & 0xFF);
+    uint8_t k = 0xA3;
+    for (int i = 0; i < 256; i++) {
+        k = (uint8_t)(k + T2[i] + (uint8_t)(i * 3));
+        uint8_t tmp = T2[i]; T2[i] = T2[k]; T2[k] = tmp;
+    }
+    g_t2 = 1;
+}
+
+/* Wendet eine Diffusionsschicht auf einen Puffer an.
+ * Basiert auf einem nichtlinearen Rueckkopplungsregister. */
+static void diffuse(uint8_t *b, int n) {
+    if (!g_t2) mk2();
+    uint8_t fb = 0xC3;
+    for (int i = 0; i < n; i++) {
+        uint8_t x = mba_xor(b[i], T2[fb]);
+        x   = mba_add(x, (uint8_t)(i * 13 + 7));
+        fb  = mba_add(fb, b[i]);
+        b[i] = x;
+    }
+}
+
+/* Berechnet einen 32-Bit Digest ueber einen transformierten Puffer.
+ * Wird intern zur Integritaetspruefung der Transformationskette
+ * verwendet. Gibt 0 zurueck wenn der Puffer korrumpiert erscheint. */
+static uint32_t integrity_digest(const uint8_t *b, int n) {
+    uint32_t d = 0xABCD1234u;
+    for (int i = 0; i < n; i++) {
+        d ^= (uint32_t)b[i];
+        d  = (d * 0x45D9F3Bu) ^ (d >> 16);
+    }
+    return d;
+}
+
+/* Zweistufige Eingabetransformation fuer den Integritaetspfad.
+ * Laeuft parallel zur Hauptpruefung und verifiziert die interne
+ * Konsistenz der Transformationskette. */
+static int verify_integrity(const uint8_t *raw, int n) {
+    uint8_t tmp[KEYLEN];
+    for (int i = 0; i < n; i++) tmp[i] = raw[i];
+    diffuse(tmp, n);
+    uint32_t d = integrity_digest(tmp, n);
+    /* Integritaet gilt als gegeben wenn Digest in erwartetem Band liegt */
+    return (d & 0xFF) != 0x00;
+}
+
+/* ------------------------------------------------------------------ */
+/* Lizenzklassen-Decoder                                               */
+/* ------------------------------------------------------------------ */
+
+/* Interne Lizenzklasse -- bestimmt Berechtigungsstufe */
+typedef enum {
+    LC_INVALID   = 0,
+    LC_TRIAL     = 1,
+    LC_STANDARD  = 2,
+    LC_EXTENDED  = 3,
+    LC_ENTERPRISE = 4
+} license_class_t;
+
+/* Dekodiert die Lizenzklasse aus dem ersten und letzten Byte des Keys.
+ * Gibt LC_INVALID zurueck wenn das Format nicht erkannt wird. */
+static license_class_t decode_license_class(const char *in, int len) {
+    if (len < 2) return LC_INVALID;
+    uint8_t head = (uint8_t)in[0];
+    uint8_t tail = (uint8_t)in[len - 1];
+    uint8_t cls  = mba_xor(head, tail);
+    cls = mba_add(cls, (uint8_t)len);
+    /* Klassen-Mapping via obere Nibbles */
+    switch (cls >> 4) {
+        case 0x4: case 0x5: return LC_TRIAL;
+        case 0x6: case 0x7: return LC_STANDARD;
+        case 0x8: case 0x9: return LC_EXTENDED;
+        case 0xA: case 0xB: return LC_ENTERPRISE;
+        default:             return LC_INVALID;
+    }
+}
+
+/* Gibt Mindest-Laenge fuer eine Lizenzklasse zurueck */
+static int lc_min_length(license_class_t cls) {
+    switch (cls) {
+        case LC_TRIAL:      return 12;
+        case LC_STANDARD:   return 16;
+        case LC_EXTENDED:   return 19;
+        case LC_ENTERPRISE: return 19;
+        default:            return 0;
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* [CSPLIT] Konstanten zusammenbauen                                   */
@@ -323,62 +431,75 @@ int main(int argc, char **argv) {
     init_state();
 
     const char *in = argv[1];
+    int inlen = (int)strlen(in);
+
+    /* Vorfilter: Format- und Zeichensatzpruefung */
+    if (!lc_precheck(in, inlen)) {
+        printf("Access denied.\n");
+        return 1;
+    }
+
+    /* Lizenzklasse bestimmen */
+    license_class_t lcls = decode_license_class(in, inlen);
+    if (lc_min_length(lcls) > inlen) {
+        printf("Access denied.\n");
+        return 1;
+    }
 
     /* [AD] Skews einmalig bestimmen */
     uint8_t ad_skew = debugger_skew();
     uint8_t t_skew  = timing_skew();
 
     /* Seed aus CSPLIT */
-    uint32_t seed = fold_const(CS_SEED); /* 0x5AA53CC3 */
+    uint32_t seed = fold_const(CS_SEED);
 
-    /* A1 durch reveal() transformieren -- das ergibt den "Zwischen-Key",
-     * der dann noch per target_byte zeichenweise verkettet wird.
-     * [NODUMP]: der vollstaendige transformierte Puffer wird danach
-     * sofort geloescht, bevor der eigentliche Vergleich laeuft. */
     uint8_t rbuf[KEYLEN];
     for (int i = 0; i < KEYLEN; i++) rbuf[i] = A1[i];
     reveal(rbuf, KEYLEN);
 
-    /* [HASH] FNV-1a-Akkumulator statt direktem Byte-Vergleich.
-     * Ein falsches Byte korrumpiert alle folgenden Hash-Fragmente --
-     * kein einzelner Vergleichspunkt verrät welches Byte falsch ist. */
-    uint32_t h_got  = 2166136261u; /* FNV offset basis */
+    /* Integritaet der Transformationskette pruefen */
+    if (!verify_integrity(rbuf, KEYLEN)) {
+        printf("Access denied.\n");
+        return 1;
+    }
+
+    /* [HASH] FNV-1a-Akkumulator statt direktem Byte-Vergleich */
+    uint32_t h_got  = 2166136261u;
     uint32_t h_want = 2166136261u;
 
-    int len_ok = (strlen(in) == KEYLEN);
-    uint8_t prev = 0x2A; /* IV */
+    int len_ok = (inlen == KEYLEN);
+    uint8_t prev = 0x2A;
 
     for (int i = 0; i < KEYLEN; i++) {
         uint8_t seedb = op_always_true(i)
                         ? (uint8_t)(seed >> ((i & 3) * 8))
                         : 0;
 
-        /* Sollwert NUR fuer diesen Durchlauf */
         uint8_t t = target_byte(rbuf[i], i, seedb, prev, ad_skew, t_skew);
 
-        uint8_t inb = (len_ok && i < (int)strlen(in)) ? (uint8_t)in[i] : 0xFF;
+        uint8_t inb = (len_ok && i < inlen) ? (uint8_t)in[i] : 0xFF;
 
-        /* FNV-1a je ein Byte akkumulieren */
         h_got  = (h_got  ^ inb) * 16777619u;
         h_want = (h_want ^ t)   * 16777619u;
 
-        /* Verkettung fortschreiben, Sollwert sofort wipen */
         prev = t;
         volatile uint8_t wipe = (uint8_t)(t ^ 0xFF);
         t = wipe; (void)t;
     }
 
-    /* rbuf sofort loeschen -- nie laenger als noetig im RAM */
     volatile uint8_t *vp = rbuf;
     for (int i = 0; i < KEYLEN; i++) vp[i] = 0;
 
-    /* [HASH] einziger Vergleich: die beiden akkumulierten Hashes */
+    /* Lizenzklassen-abhaengige Zusatzpruefung */
+    volatile uint32_t cls_check = (uint32_t)lcls * 0x9E3779B9u;
+    cls_check ^= (cls_check >> 16);
+    (void)cls_check;
+
     int ok = len_ok && (h_got == h_want);
 
     if (ok) printf("Access granted. Welcome, licensed user.\n");
     else    printf("Access denied.\n");
 
-    /* [JUNK] Schein-Pruefsumme, die nie ausgewertet wird */
     volatile uint32_t dummy = h_got ^ h_want ^ 0xDEADBEEFu;
     (void)dummy;
 
