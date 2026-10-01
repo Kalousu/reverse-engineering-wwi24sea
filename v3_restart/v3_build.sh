@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -e
 echo "[*] Kompiliere lockbox (Challenge-Binary)..."
-gcc -O2 -s -fno-asynchronous-unwind-tables -o lockbox v3_lockbox.c
-strip --strip-all lockbox 2>/dev/null || true
+gcc -O2 -s -fno-asynchronous-unwind-tables -o ../build/v3/lockbox v3_lockbox.c
+strip --strip-all ../build/v3/ockbox 2>/dev/null || true
 
 echo "[*] Kompiliere Referenz-Solver..."
-gcc -O2 -o solve v3_solve.c
+gcc -O2 -o ../build/v3/solve v3_solve.c
 
 echo ""
 echo "[+] Fertig."
